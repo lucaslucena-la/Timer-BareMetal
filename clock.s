@@ -69,7 +69,7 @@ _start:
     csrw mtvec, t0
 
     # Configura o Primeiro disparo do Times
-    jal timer_ set
+    jal timer_set
 
     # Habilita interrupções especíicas no MIE (Machine Interrupt Enable)
     # Bit 7: MTIE Machine Timer Interrupt Enable
@@ -120,4 +120,50 @@ main_loop:
     wfi           # looping infinito sem fazer nada
     j main_loop
 
+#
+
+#                       TRAP HANDLER                         #
+
+trap_handler:
+
+    # 1. SALVAR CONTEXTO: Guarda registradores usados para não corromper o main_loop
+    addi sp, sp, -16            # Abre espaço na pilha 
+    sd t0, 0(sp)                # Salva t0
+    sd t1, 8(sp)                # Salva t1
+
+    # Identifica a causa da interrupção no registrador mcause
+    csrr t0, mcause
+
+    # Verifica se é Interrupção de Timer (Machine Timer Interrupt)
+    li t1, 0x8000000000000007   # Machine Timer Interrupt
+    beq t0, t1, call_timer
+
+    # Verifica se é Interrupção Externa (Machine External Interrupt)
+    li t1, 0x800000000000000B   # Machine External Interrupt
+    beq t0, t1, call_external
+    
+    j exit_trap
+
+    call_timer:
+        # Chama o handler do timer
+        jal timer_interrupt
+        j exit_trap
+    #
+
+    call_external:
+        # Chama o handler da UART   
+        jal external_interrupt
+        j exit_trap
+    #
+
+    exit_trap:  
+        # RESTAURAR CONTEXTO: Devolve os valores originais aos registradores
+        ld t0, 0(sp)                # Restaura t0 
+        ld t1, 8(sp)                # Restaura t1
+        addi sp, sp, 16             # Fecha o espaço na pilha 
+
+        mret                        # Retorna ao ponto da interrupção
+    #
+
+#
 
