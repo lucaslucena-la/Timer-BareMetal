@@ -35,7 +35,7 @@
 #               REGISTRADORES PLIC                         #
 .equ PLIC_PRIORITY,    (PLIC_BASE + 0x0)       # Endereço base para configurar prioridade das interrupções - (0x0C000000)
 .equ PLIC_ENABLE,      (PLIC_BASE + 0x2000)    # Registrador para habilitar/desabilitar interrupções - (0x0C002000)
-.equ PLIC_THRESHOLD,   (PLIC_BASE + 0x200000)  # Registrador de limiar de prioridade mínima - (0x0C020000)
+.equ PLIC_THRESHOLD,   (PLIC_BASE + 0x200000)  # Registrador de limiar de prioridade mínima - (0x0C200000)
 .equ PLIC_CLAIM,       (PLIC_BASE + 0x200004)  # Registrador para ler (claim) e completar (complete) interrupções - (0x0C020004)
 # ============================================================
 
@@ -92,6 +92,7 @@ _start:
 
     # aponta mtvec para a nossa rotina de tratamento
     csrw mtvec, t0 # Escreve o endereço do trap_handler no registrador especial mtvec 
+    # mtvec é o registrador que a CPU usa para saber para onde desviar quando ocorre uma interrupção ou exceção. Ao configurar mtvec com o endereço de trap_handler, garantimos que nossa função de tratamento será chamada sempre que uma interrupção ocorrer.
 
     # Configura o Primeiro disparo do Times
     jal timer_set
@@ -103,14 +104,14 @@ _start:
     li t0, (1 << 7) | (1 << 11) # Configura t0 para habilitar MTIE e MEIE, bit 7 e bit 11 respectivamente
     csrs mie, t0                # Escreve o valor em t0 no registrador mie para habilitar as interrupções de timer e externas
 
-    # Configuração da UART e PLIC
+    # Configuração da UART e PLIC para que a UART possa gerar interrupções corretamente
     li t0, UART_BASE            # Carrega o endereço base do UART em t0 = 0x10000000
     li t1, 1                    # Valor para habilitar interrupção de recepção (bit 0 do IER)
     sb t1, UART_IER(t0)         # Escreve 1 no primeiro byte de UART_IER para habilitar interrupção de recepção = UART_BASE + 1 = 0x10000001;
     
     # Configura a prioridade da UART no PLIC
-    li t0, PLIC_PRIORITY # Carrega o endereço base do PLIC_PRIORITY em t0 = 0x0C000000
-    li t1, UART_IRQ             # t1 = 10
+    li t0, PLIC_PRIORITY        # Carrega o endereço base do PLIC_PRIORITY em t0 = 0x0C000000: É o início da tabela de prioridades do PLIC
+    li t1, UART_IRQ             # t1 = 10, a UART no QEMU VIRT tem o IRQ 10, isso é feito para calcular o endereço específico da prioridade da UART no PLIC
     slli t1, t1, 2              # t1 = 10 * 4 (cada prioridade tem 4 bytes)
     add t0, t0, t1              # t0  = PLIC_PRIORITY + (UART_IRQ * 4) - isso é feito para calcular o endereço específico da prioridade da UART no PLIC
     li t1, 1                    # Prioridade 1, quer dizer que a UART tem prioridade mínima para gerar interrupção
@@ -119,17 +120,11 @@ _start:
     # habilitar interrupções no PLIC
     li t0, PLIC_ENABLE          # Carrega o endereço base do PLIC_ENABLE em t0 = 0x0C002000
     li t1, (1 << UART_IRQ)      # t1 = 1 << 10, isso é feito para criar uma máscara que habilita apenas a interrupção da UART (bit 10)
-    sw t1, 0(t0)                # Escreve a máscara no registrador de habilitação do PLIC para habilitar a interrupção da UART
+    sw t1, 0(t0)                # Escreve a máscara no registrador de habilitação do PLIC para habilitar a interrupção da UART; 
 
-    # Define limiar zero
-    li t0, PLIC_THRESHOLD       # Carrega o endereço do PLIC_THRESHOLD em t0 = 0x0C020000
+    # Define limiar zero: permite que qualquer interrupção com prioridade maior que zero seja processada
+    li t0, PLIC_THRESHOLD       # Carrega o endereço do PLIC_THRESHOLD em t0 = 0x0C200000
     sw zero, 0(t0)              # Escreve zero no registrador de limiar do PLIC para permitir que qualquer interrupção com prioridade maior que zero seja processada
-
-    # habilita interrupções externas na cpu 
-    # registrador mie:                                    
-    # bit 11 = Machine External Interrupt Enable   
-    li t0, (1 << 11)           # Configura t0 para habilitar MEIE, bit 11
-    csrs mie, t0               # Escreve o valor de t0 no registrador mie para habilitar as interrupções externas (PLIC e, consequentemente, a UART)
 
     # Habilita interrupções globais na cpu
     # mstatus register:                                    
@@ -159,8 +154,8 @@ main_loop:
 
 timer_set:
 
-    li t0, MTIME                # Carrega o endereço de MTIME em t0
-    ld t1, 0(t0)                # Lê o valor atual do contador de tempo em t1
+    li t0, MTIME                # Carrega o endereço de MTIME em t0 = 0x0200BFF8, tempo real do hardware
+    ld t1, 0(t0)                # Lê o valor atual do contador de tempo em t1 
     # t1 aqui representa o tempo atual em ciclos de clock
 
     li t2, INTERVAL             # Carrega o intervalo (30000000 ciclos) em t2
