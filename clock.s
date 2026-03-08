@@ -1,243 +1,347 @@
-# Mapeamento de memória e constantes
-# Endereços do CLINT (Para o Timer) e do PLIC (Para UART)
-# CLint é um bloco de hardware 
+# =============================================================
+# Relógio Digital — RISC-V Bare Metal (QEMU virt)
+# Timer via CLINT | UART via PLIC | Sem SO
+# =============================================================
 
+# ── Endereços base ────────────────────────────────────────────
+.equ UART_BASE,    0x10000000
+.equ PLIC_BASE,    0x0C000000
+.equ MTIME,        0x0200BFF8  # contador livre do CLINT
+.equ MTIMECMP,     0x02004000  # dispara interrupção quando MTIME >= MTIMECMP
 
-#                 MEMORY MAP (QEMU virt)                   #
-# UART base: 0x10000000                                    #
-# PLIC base: 0x0C000000                                    #
+# ── Offsets UART (NS16550) ────────────────────────────────────
+.equ UART_RHR, 0   # leitura de byte recebido
+.equ UART_THR, 0   # escrita de byte a transmitir
+.equ UART_IER, 1   # habilita interrupções da UART
+.equ UART_LSR, 5   # bit 5 = THRE (TX livre para enviar)
+.equ UART_IRQ, 10  # IRQ da UART no PLIC
 
-.equ UART_BASE, 0x10000000 # base do UART
-.equ PLIC_BASE, 0x0C000000 # base do PLIC
-# ============================================================
+# ── Registradores PLIC ────────────────────────────────────────
+.equ PLIC_PRIORITY,  (PLIC_BASE + 0x000000)
+.equ PLIC_ENABLE,    (PLIC_BASE + 0x002000)
+.equ PLIC_THRESHOLD, (PLIC_BASE + 0x200000)
+.equ PLIC_CLAIM,     (PLIC_BASE + 0x200004)
 
-#            registradores UART (NS1655)                   #
-# MTIME: 0x0200BFF8 # contador de tempo real
-# MTIMECMP: 0x02004000 # registrador de comparação para o timer
-# Receive Holding Register  (RHR):  UART_BASE + 0          #
-# Transmit Holding Register (THR):  UART_BASE + 0          #
-# Interrupt Enable Register (IER):  UART_BASE + 1          #
-# IRQ do UART: 10 (para o PLIC)                            #
-# 
-# REGISTRADORES E CONSTANTES DO TIMER E UART
+# ── Timer: 10 MHz → 10_000_000 ciclos = 1 segundo ────────────
+.equ INTERVAL, 10000000
 
-.equ MTIME, 0x0200BFF8 # Registrador de contador de tempo real - incrementa automaticamente a cada ciclo do clock
-.equ MTIMECMP, 0x02004000 # Registrador de comparação - quando MTIME >= MTIMECMP, gera interrupção de timer
-.equ INTERVAL, 30000000 # Intervalo em ciclos de clock para gerar interrupção (aproximadamente 1 segundo em QEMU virt)
-
-# REGISTRADORES DA UART (NS16550)
-.equ UART_RHR, 0 # Receive Holding Register - lê dados recebidos (endereço relativo ao UART_BASE) - (endereço: UART_BASE + 0 = 0x10000000 )
-.equ UART_THR, 0 # Transmit Holding Register - escreve dados para transmitir (mesmo endereço que RHR) - (endereço: UART_BASE + 0 = 0x10000000)
-.equ UART_IER, 1 # Interrupt Enable Register - habilita/desabilita interrupções da UART (endereço relativo ao UART_BASE) - (endereço: UART_BASE + 1 = 0x10000001)
-.equ UART_IRQ, 10 # Número da interrupção (IRQ) da UART no PLIC - usado para identificar qual dispositivo interrompeu - (endereço: PLIC_BASE + 10*4 = 0x0C00228)
-# ============================================================
-
-#               REGISTRADORES PLIC                         #
-.equ PLIC_PRIORITY,    (PLIC_BASE + 0x0)       # Endereço base para configurar prioridade das interrupções - (0x0C000000)
-.equ PLIC_ENABLE,      (PLIC_BASE + 0x2000)    # Registrador para habilitar/desabilitar interrupções - (0x0C002000)
-.equ PLIC_THRESHOLD,   (PLIC_BASE + 0x200000)  # Registrador de limiar de prioridade mínima - (0x0C200000)
-.equ PLIC_CLAIM,       (PLIC_BASE + 0x200004)  # Registrador para ler (claim) e completar (complete) interrupções - (0x0C020004)
-# ============================================================
-
-# ============================================================
-# SEÇÃO .bss (Block Started by Symbol)
-# Dados não inicializados - alocados em tempo de ligação
-# ============================================================
-
+# =============================================================
+# .bss — dados não inicializados
+# =============================================================
 .section .bss
 
-# PILHA (Stack)
-# - Usada para armazenar contexto durante interrupções
-# - Cresce de cima para baixo (endereços decrescentes)
-# - 4096 bytes (4KB) de espaço reservado
 .space 4096
-stack_top:                  # Rótulo que marca o topo da pilha
+stack_top:              # pilha de 4 KB (cresce para baixo)
 
-# ============================================================
-# VARIÁVEIS GLOBAIS DO RELÓGIO (Clock)
-# - Incrementadas pela rotina de timer_interrupt
-# - Rastreiam tempo em formato HH:MM:SS (23:59:59)
-# ============================================================
+horas:    .word 0
+minutos:  .word 0
+segundos: .word 0
 
-horas:      .word 0         # Registra horas (0-23) - 4 bytes
-minutos:    .word 0         # Registra minutos (0-59) - 4 bytes
-segundos:   .word 0         # Registra segundos (0-59) - 4 bytes
+uart_buffer: .space 32  # acumula comando "T HH:MM:SS"
+uart_index:  .word 0    # próxima posição livre no buffer
 
-# ============================================================
-# BUFFER UART e ÍNDICE
-# - Buffer: armazena comando de entrada "T HH:MM:SS"
-# - Índice: rastreia posição atual no buffer
-# ============================================================
-
-uart_buffer:  .space 32     # 32 bytes para armazenar comando
-uart_index:   .word 0       # Índice de preenchimento do buffer
-
-# ============================================================
-# SEÇÃO .text (Código Executável)
-# Contém as instruções do programa
-# ============================================================
-
+# =============================================================
+# .text — código
+# =============================================================
 .section .text
-.global _start              # Exporta _start como símbolo global
+.global _start
 
-
-# ============================================================
-#                       PONTO DE ENTRADA                      #
+# -------------------------------------------------------------
+# _start: inicialização e loop principal
+# -------------------------------------------------------------
 _start:
-    # Inicialização da pilha 
-    la sp, stack_top # sp (stack pointer) aponta para o topo da pilha
+    la   sp, stack_top              # inicializa pilha
 
-    # Configuração do trap handler
-    la t0, trap_handler # Carrega endereço do da função trap_handler em t0
+    la   t0, trap_handler
+    csrw mtvec, t0                  # registra handler de interrupções
 
-    # aponta mtvec para a nossa rotina de tratamento
-    csrw mtvec, t0 # Escreve o endereço do trap_handler no registrador especial mtvec 
-    # mtvec é o registrador que a CPU usa para saber para onde desviar quando ocorre uma interrupção ou exceção. Ao configurar mtvec com o endereço de trap_handler, garantimos que nossa função de tratamento será chamada sempre que uma interrupção ocorrer.
+    jal  timer_set                  # agenda primeira interrupção de timer
 
-    # Configura o Primeiro disparo do Times
-    jal timer_set
-    # quando retornar do timer_set, o timer já estará configurado para disparar a primeira interrupção após 1 segundo
+    # habilita interrupções de timer (bit 7) e externas (bit 11)
+    li   t0, (1<<7)|(1<<11)
+    csrs mie, t0
 
-    # Habilita interrupções especíicas no MIE (Machine Interrupt Enable): 
-    # Bit 7 (MTIE): É o interruptor da Interrupção de Timer. Ele avisa a CPU que ela deve ouvir o temporizador.
-    # Bit 11 (MEIE): É o interruptor da Interrupção Externa. Ele avisa a CPU que ela deve ouvir o PLIC (e, consequentemente, a UART).
-    li t0, (1 << 7) | (1 << 11) # Configura t0 para habilitar MTIE e MEIE, bit 7 e bit 11 respectivamente
-    csrs mie, t0                # Escreve o valor em t0 no registrador mie para habilitar as interrupções de timer e externas
+    # UART: habilita interrupção de recepção
+    li   t0, UART_BASE
+    li   t1, 1
+    sb   t1, UART_IER(t0)
 
-    # Configuração da UART e PLIC para que a UART possa gerar interrupções corretamente
-    li t0, UART_BASE            # Carrega o endereço base do UART em t0 = 0x10000000
-    li t1, 1                    # Valor para habilitar interrupção de recepção (bit 0 do IER)
-    sb t1, UART_IER(t0)         # Escreve 1 no primeiro byte de UART_IER para habilitar interrupção de recepção = UART_BASE + 1 = 0x10000001;
-    
-    # Configura a prioridade da UART no PLIC
-    li t0, PLIC_PRIORITY        # Carrega o endereço base do PLIC_PRIORITY em t0 = 0x0C000000: É o início da tabela de prioridades do PLIC
-    li t1, UART_IRQ             # t1 = 10, a UART no QEMU VIRT tem o IRQ 10, isso é feito para calcular o endereço específico da prioridade da UART no PLIC
-    slli t1, t1, 2              # t1 = 10 * 4 (cada prioridade tem 4 bytes)
-    add t0, t0, t1              # t0  = PLIC_PRIORITY + (UART_IRQ * 4) - isso é feito para calcular o endereço específico da prioridade da UART no PLIC
-    li t1, 1                    # Prioridade 1, quer dizer que a UART tem prioridade mínima para gerar interrupção
-    sw t1, 0(t0)                # Escreve a prioridade da UART no endereço calculado
+    # PLIC: prioridade 1 para UART_IRQ
+    li   t0, PLIC_PRIORITY
+    li   t1, UART_IRQ
+    slli t1, t1, 2                  # offset = IRQ * 4 bytes
+    add  t0, t0, t1
+    li   t1, 1
+    sw   t1, 0(t0)
 
-    # habilitar interrupções no PLIC
-    li t0, PLIC_ENABLE          # Carrega o endereço base do PLIC_ENABLE em t0 = 0x0C002000
-    li t1, (1 << UART_IRQ)      # t1 = 1 << 10, isso é feito para criar uma máscara que habilita apenas a interrupção da UART (bit 10)
-    sw t1, 0(t0)                # Escreve a máscara no registrador de habilitação do PLIC para habilitar a interrupção da UART; 
+    # PLIC: habilita bit do UART_IRQ no registrador de enable
+    li   t0, PLIC_ENABLE
+    li   t1, (1<<UART_IRQ)
+    sw   t1, 0(t0)
 
-    # Define limiar zero: permite que qualquer interrupção com prioridade maior que zero seja processada
-    li t0, PLIC_THRESHOLD       # Carrega o endereço do PLIC_THRESHOLD em t0 = 0x0C200000
-    sw zero, 0(t0)              # Escreve zero no registrador de limiar do PLIC para permitir que qualquer interrupção com prioridade maior que zero seja processada
+    # PLIC: threshold 0 → aceita qualquer prioridade >= 1
+    li   t0, PLIC_THRESHOLD
+    sw   zero, 0(t0)
 
-    # Habilita interrupções globais na cpu
-    # mstatus register:                                    
-    # bit 3 = MIE global enable  
-    li t0, (1 << 3)         # Configura t0 para habilitar MIE global, bit 3
-    csrs mstatus, t0        # Escreve o valor de t0 no registrador mstatus para habilitar as interrupções globais na CPU
-#
-
-# ============================================================
-#                       LOOP PRINCIPAL                      #
+    # habilita interrupções globais (mstatus.MIE = bit 3)
+    li   t0, (1<<3)
+    csrs mstatus, t0
 
 main_loop:
-    wfi           # looping infinito sem fazer nada
-    j main_loop
+    wfi                             # dorme até próxima interrupção
+    j    main_loop
 
-#
-
-# ============================================================
-# FUNÇÃO: timer_set
-# Descrição: Define o próximo instante de disparo do timer
-# - Lê o valor atual de MTIME (contador de tempo real)
-# - Adiciona INTERVAL (período de 1 segundo)
-# - Escreve o resultado em MTIMECMP para gerar interrupção
-
-# ============================================================
-#                       timer_set                            #
-
+# -------------------------------------------------------------
+# timer_set: agenda próximo disparo em MTIME + INTERVAL
+# -------------------------------------------------------------
 timer_set:
+    li   t0, MTIME
+    ld   t1, 0(t0)                  # t1 = tempo atual
+    li   t2, INTERVAL
+    add  t1, t1, t2                 # t1 = tempo atual + 1 s
+    li   t0, MTIMECMP
+    sd   t1, 0(t0)                  # escreve próximo disparo
+    jr   ra
 
-    li t0, MTIME                # Carrega o endereço de MTIME em t0 = 0x0200BFF8, tempo real do hardware
-    ld t1, 0(t0)                # Lê o valor atual do contador de tempo em t1 
-    # t1 aqui representa o tempo atual em ciclos de clock
-
-    li t2, INTERVAL             # Carrega o intervalo (30000000 ciclos) em t2
-    add t1, t1, t2              # Calcula: t1 = tempo_atual + INTERVAL; 
-
-    li t0, MTIMECMP             # Carrega o endereço do registrador MTIMECMP em t0
-    sd t1, 0(t0)                # Escreve o novo valor em MTIMECMP (próximo disparo)
-
-    jr ra                       # Retorna para o endereço de retorno (armazenado em ra)
-#
-
-# ============================================================
-# Função: trap_handler
-# Descrição: Trata interrupções e exceções
-#
-# Esta função é chamada automaticamente quando ocorre uma
-# interrupção (timer ou UART) ou exceção na CPU.
-#
-# Fluxo:
-# 1. Salva registradores usados (t0, t1) na pilha
-# 2. Lê o registrador mcause para identificar a causa
-# 3. Compara mcause com valores conhecidos de interrupções
-# 4. Desvia para o handler apropriado (timer ou UART)
-# 5. Restaura registradores da pilha
-# 6. Retorna à instrução interrompida com mret
-
-#                       TRAP HANDLER                         #
-
+# -------------------------------------------------------------
+# trap_handler: identifica a causa e despacha para o handler
+# Salva apenas t0/t1 — os handlers salvam o que precisam
+# -------------------------------------------------------------
+.align 2
 trap_handler:
+    addi sp, sp, -16
+    sd   t0, 0(sp)
+    sd   t1, 8(sp)
 
-    # 1. SALVAR CONTEXTO: Guarda registradores usados para não corromper o main_loop
-    addi sp, sp, -16            # Abre espaço na pilha 
-    sd t0, 0(sp)                # Salva t0
-    sd t1, 8(sp)                # Salva t1
-
-    # Identifica a causa da interrupção no registrador mcause
     csrr t0, mcause
+    li   t1, 0x8000000000000007     # Machine Timer Interrupt
+    beq  t0, t1, call_timer
+    li   t1, 0x800000000000000B     # Machine External Interrupt
+    beq  t0, t1, call_external
+    j    exit_trap
 
-    # Verifica se é Interrupção de Timer (Machine Timer Interrupt)
-    li t1, 0x8000000000000007   # Machine Timer Interrupt
-    beq t0, t1, call_timer
+call_timer:
+    jal  timer_interrupt
+    j    exit_trap
 
-    # Verifica se é Interrupção Externa (Machine External Interrupt)
-    li t1, 0x800000000000000B   # Machine External Interrupt
-    beq t0, t1, call_external
-    
-    j exit_trap
+call_external:
+    jal  external_interrupt
 
-    call_timer:
-        # Chama o handler do timer
-        jal timer_interrupt
-        j exit_trap
-    #
+exit_trap:
+    ld   t0, 0(sp)
+    ld   t1, 8(sp)
+    addi sp, sp, 16
+    mret
 
-    call_external:
-        # Chama o handler da UART   
-        jal external_interrupt
-        j exit_trap
-    #
+# -------------------------------------------------------------
+# uart_putchar: envia byte em a0 pela UART (polling no TX)
+# -------------------------------------------------------------
+uart_putchar:
+uart_putchar_wait:
+    li   t0, UART_BASE
+    lb   t1, UART_LSR(t0)           # lê Line Status Register
+    andi t1, t1, 0x20               # isola THRE (bit 5)
+    beqz t1, uart_putchar_wait      # TX ocupado: espera
+    sb   a0, UART_THR(t0)           # TX livre: envia
+    jr   ra
 
-    exit_trap:  
-        # RESTAURAR CONTEXTO: Devolve os valores originais aos registradores
-        ld t0, 0(sp)                # Restaura t0 
-        ld t1, 8(sp)                # Restaura t1
-        addi sp, sp, 16             # Fecha o espaço na pilha 
+# -------------------------------------------------------------
+# print_two_digits: imprime número 0–59 como dois dígitos ASCII
+# a0 = número de entrada
+# -------------------------------------------------------------
+print_two_digits:
+    addi sp, sp, -16
+    sd   ra, 0(sp)
+    sd   s4, 8(sp)
 
-        mret                        # Retorna ao ponto da interrupção
-    #
+    mv   s4, a0                     # preserva valor original
 
+    li   t1, 10
+    div  t0, s4, t1                 # dezena = valor / 10
+    addi a0, t0, '0'
+    jal  uart_putchar
 
-# 
+    li   t1, 10
+    rem  t0, s4, t1                 # unidade = valor % 10
+    addi a0, t0, '0'
+    jal  uart_putchar
 
-# TODO: IMPLEMENTAÇÕES RESTANTES                           #
-# ============================================================
+    ld   ra, 0(sp)
+    ld   s4, 8(sp)
+    addi sp, sp, 16
+    jr   ra
 
-# 1. timer_interrupt:
-#    - Incrementar segundos/minutos/horas (00:00:00 a 23:59:59)
-#    - Chamar timer_set para o próximo segundo=
-#    - Imprimir o tempo na UART e finalizar com mret
+# -------------------------------------------------------------
+# timer_interrupt: incrementa o relógio e imprime HH:MM:SS
+# Callee-saved usados: s0=horas, s1=minutos, s2=segundos, s4
+# -------------------------------------------------------------
+timer_interrupt:
+    addi sp, sp, -40
+    sd   ra,  0(sp)
+    sd   s0,  8(sp)
+    sd   s1, 16(sp)
+    sd   s2, 24(sp)
+    sd   s4, 32(sp)
 
-# 2. external_interrupt:
-#    - PLIC Claim: Ler ID da interrupção em PLIC_CLAIM
-#    - Se ID=10, ler caractere da UART e processar comando 'T HH:MM:SS
-#    - PLIC Complete: Escrever ID de volta em PLIC_CLAIM
-#    - Finalizar com mret
+    # carrega valores atuais
+    la   t0, horas
+    lw s0, 0(t0)
+    la   t0, minutos
+    lw s1, 0(t0)
+    la   t0, segundos
+    lw s2, 0(t0)
+
+    # incrementa com cascata: segundos → minutos → horas
+    addi s2, s2, 1
+    li   t0, 60
+    blt  s2, t0, tick_save
+    li   s2, 0
+    addi s1, s1, 1
+    blt  s1, t0, tick_save
+    li   s1, 0
+    addi s0, s0, 1
+    li   t0, 24
+    blt  s0, t0, tick_save
+    li   s0, 0                      # rollover 23:59:59 → 00:00:00
+
+tick_save:
+    la   t0, horas
+    sw s0, 0(t0)
+    la   t0, minutos
+    sw s1, 0(t0)
+    la   t0, segundos
+    sw s2, 0(t0)
+
+    jal  timer_set                  # reagenda próximo disparo
+
+    # imprime "HH:MM:SS\r\n"
+    mv   a0, s0
+    jal print_two_digits
+    li   a0, ':'
+    jal uart_putchar
+    mv   a0, s1
+    jal print_two_digits
+    li   a0, ':'
+    jal uart_putchar
+    mv   a0, s2
+    jal print_two_digits
+    li   a0, '\r'
+    jal uart_putchar
+    li   a0, '\n'
+    jal uart_putchar
+
+    ld   ra,  0(sp)
+    ld   s0,  8(sp)
+    ld   s1, 16(sp)
+    ld   s2, 24(sp)
+    ld   s4, 32(sp)
+    addi sp, sp, 40
+    jr   ra
+
+# -------------------------------------------------------------
+# external_interrupt: recebe char da UART e processa "T HH:MM:SS"
+# Callee-saved: s0=IRQ id, s1=&uart_index, s2=índice, s3=&buffer
+# -------------------------------------------------------------
+external_interrupt:
+    addi sp, sp, -40
+    sd   ra,  0(sp)
+    sd   s0,  8(sp)
+    sd   s1, 16(sp)
+    sd   s2, 24(sp)
+    sd   s3, 32(sp)
+
+    # PLIC Claim: obtém IRQ pendente e trava o PLIC para ele
+    li   t0, PLIC_CLAIM
+    lw   s0, 0(t0)
+    li   t1, UART_IRQ
+    bne  s0, t1, ext_done           # não é UART: ignora
+
+    # lê o byte recebido
+    li   t0, UART_BASE
+    lb   t1, UART_RHR(t0)
+
+    la   s1, uart_index
+    lw   s2, 0(s1)
+    la   s3, uart_buffer
+
+    # '\n' ou '\r' → interpreta comando acumulado
+    li   t0, '\n'
+    beq t1, t0, ext_parse
+    li   t0, '\r'
+    beq t1, t0, ext_parse
+
+    # acumula char no buffer (máx 31 chars)
+    li   t0, 31
+    bge  s2, t0, ext_done
+    add  t0, s3, s2
+    sb   t1, 0(t0)
+    addi s2, s2, 1
+    sw   s2, 0(s1)
+    j    ext_done
+
+ext_parse:
+    # formato: "T HH:MM:SS" — mínimo 10 chars, começa com 'T'
+    li   t0, 10
+    blt s2, t0, ext_reset
+    lb   t0, 0(s3)
+    li t1, 'T'
+    bne t0, t1, ext_reset
+
+    # extrai HH (posições 2-3)
+    lb   t0, 2(s3)
+    addi t0, t0, -'0'
+    li t2, 10
+    mul t0, t0, t2
+    lb   t1, 3(s3)
+    addi t1, t1, -'0'
+    add t0, t0, t1
+    li   t1, 24
+    bge t0, t1, ext_reset
+    mv   t2, t0                     # t2 = horas válidas
+
+    # extrai MM (posições 5-6)
+    lb   t0, 5(s3)
+    addi t0, t0, -'0'
+    li a1, 10
+    mul t0, t0, a1
+    lb   a0, 6(s3)
+    addi a0, a0, -'0'
+    add t0, t0, a0
+    li   a0, 60
+    bge t0, a0, ext_reset
+    mv   a1, t0                     # a1 = minutos válidos
+
+    # extrai SS (posições 8-9)
+    lb   t0, 8(s3)
+    addi t0, t0, -'0'
+    li a2, 10
+    mul t0, t0, a2
+    lb   a2, 9(s3)
+    addi a2, a2, -'0'
+    add t0, t0, a2
+    li   a2, 60
+    bge t0, a2, ext_reset
+
+    # atualiza relógio
+    la   a2, horas
+    sw t2, 0(a2)
+    la   a2, minutos
+    sw a1, 0(a2)
+    la   a2, segundos
+    sw t0, 0(a2)
+
+ext_reset:
+    sw   zero, 0(s1)                # zera índice do buffer
+
+ext_done:
+    # PLIC Complete: libera o PLIC para nova interrupção desse IRQ
+    li   t0, PLIC_CLAIM
+    sw   s0, 0(t0)
+
+    ld   ra,  0(sp)
+    ld   s0,  8(sp)
+    ld   s1, 16(sp)
+    ld   s2, 24(sp)
+    ld   s3, 32(sp)
+    addi sp, sp, 40
+    jr   ra
